@@ -22,7 +22,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Threshold for considering a page "empty" (adjust as needed)
 EMPTY_PAGE_THRESHOLD = 100  # characters
 
 
@@ -45,7 +44,8 @@ def _process_pdf_pages(
     start_page: int,          # 1-indexed, inclusive
     end_page: int,            # 1-indexed, inclusive
     batch_size: int = 20,
-    layout=None               # optional pre-loaded layout
+    layout=None,              # optional pre-loaded layout
+    overall_start_time: Optional[float] = None  # for ETA
 ) -> Tuple[List[str], List[int]]:
     """
     Process a range of pages and return:
@@ -54,6 +54,8 @@ def _process_pdf_pages(
     """
     if layout is None:
         layout = load_layout_model()
+    if overall_start_time is None:
+        overall_start_time = time.time()
 
     reader = PdfReader(pdf_path)
     total_pages = len(reader.pages)
@@ -75,16 +77,17 @@ def _process_pdf_pages(
     all_page_texts = []
     empty_pages = []
 
-    # Create batches within the range
+    # Create batches within the range (0-based indices)
     batches = [
         (i, min(i + batch_size - 1, actual_end - 1))
-        for i in range(actual_start - 1, actual_end, batch_size)   # i is 0-based start
+        for i in range(actual_start - 1, actual_end, batch_size)
     ]
+    num_batches = len(batches)
 
     for batch_num, (start_0, end_0) in enumerate(batches, 1):
         batch_start_time = time.time()
         pages_in_batch = end_0 - start_0 + 1
-        logger.info(f"Batch {batch_num}/{len(batches)} | Pages {start_0+1}-{end_0+1}")
+        logger.info(f"Batch {batch_num}/{num_batches} | Pages {start_0+1}-{end_0+1}")
 
         # Build batch PDF in memory
         writer = PdfWriter()
@@ -104,21 +107,28 @@ def _process_pdf_pages(
         # Extract each page's text
         for offset, (page_layout, spans) in enumerate(doc._.pages):
             page_num = start_0 + offset + 1   # 1-indexed
-            page_text = ''.join(span.text for span in spans).strip()
-
+            # page_text = ''.join(span.text for span in spans).strip()
+            page_text = doc._.markdown  
             all_page_texts.append(page_text)
 
-            # Verification: detect empty/short pages
             if len(page_text) < EMPTY_PAGE_THRESHOLD:
                 logger.warning(f"Page {page_num} may be empty (length {len(page_text)} chars)")
                 empty_pages.append(page_num)
 
-        del doc   # free memory
+        del doc
 
-        # Performance logging
+        # Performance metrics and ETA
         elapsed = time.time() - batch_start_time
         pps = pages_in_batch / elapsed if elapsed > 0 else 0
         logger.info(f"Batch finished in {timedelta(seconds=int(elapsed))} ({pps:.2f} pages/sec)")
+
+        batches_done = batch_num
+        elapsed_since_start = time.time() - overall_start_time
+        avg_time_per_batch = elapsed_since_start / batches_done
+        remaining_batches = num_batches - batches_done
+        if remaining_batches > 0:
+            eta = avg_time_per_batch * remaining_batches
+            logger.info(f"Estimated remaining time: {timedelta(seconds=int(eta))}")
 
     return all_page_texts, empty_pages
 
@@ -140,7 +150,8 @@ def process_pdf(pdf_path: str, batch_size: int = 20) -> Tuple[List[str], List[in
         start_page=1,
         end_page=total_pages,
         batch_size=batch_size,
-        layout=layout
+        layout=layout,
+        overall_start_time=start_time
     )
 
     total_elapsed = time.time() - start_time
@@ -150,7 +161,6 @@ def process_pdf(pdf_path: str, batch_size: int = 20) -> Tuple[List[str], List[in
         logger.warning(f"Empty/short pages detected: {empty_pages}")
     else:
         logger.info("No empty pages detected.")
-
     return page_texts, empty_pages
 
 
@@ -175,7 +185,8 @@ def process_pdf_page_range(
         start_page=start_page,
         end_page=end_page,
         batch_size=batch_size,
-        layout=layout
+        layout=layout,
+        overall_start_time=start_time
     )
 
     total_elapsed = time.time() - start_time
@@ -208,7 +219,6 @@ def save_output_with_pages(
             f.write("\n")
     logger.info(f"Saved successfully ({os.path.getsize(output_file)} bytes)")
 
-    # Save empty pages report
     if empty_pages:
         empty_file = output_file.replace(".txt", "_empty_pages.txt")
         with open(empty_file, "w") as f:
@@ -222,10 +232,7 @@ def save_output_with_pages(
 # Run (example usage)
 # -------------------------
 if __name__ == "__main__":
-    # Example 1: Process entire PDF
-    # page_texts, empty = process_pdf(FILEPATH, batch_size=20)
-    # save_output_with_pages(page_texts, empty, "full_extract.txt")
-
-    # Example 2: Process only pages 100-200
+    # Example: Process only select pages
     page_texts, empty = process_pdf_page_range(FILEPATH, 100, 200, batch_size=10)
     save_output_with_pages(page_texts, empty, "range_100-200.txt", start_page_num=100)
+
