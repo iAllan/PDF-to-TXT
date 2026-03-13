@@ -1,0 +1,11 @@
+services:
+  pdf-ocr-api:
+    build: .
+    container_name: pdf_ocr_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - FILEPATH=
+    restart: unless-stopped

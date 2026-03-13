@@ -75,7 +75,7 @@ def analyze_output(output_file, expected_pages=None):
     return pages
 
 if __name__ == "__main__":
-    output_file = sys.argv[1] if len(sys.argv) > 1 else "range_100-200.txt"
-    expected = 100  # adjust as needed
+    output_file = sys.argv[1] if len(sys.argv) > 1 else "module_1_extracted_range_1-20.txt"
+    expected = 20  # adjust as needed
     clean_output_file(output_file)
     analyze_output(output_file, expected)

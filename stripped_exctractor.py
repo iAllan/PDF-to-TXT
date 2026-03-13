@@ -46,7 +46,7 @@ def _process_pdf_pages(
     batch_size: int = 20,
     layout=None,              # optional pre-loaded layout
     overall_start_time: Optional[float] = None  # for ETA
-) -> Tuple[List[str], List[int]]:
+) -> Tuple[List[str], List[int], int]:
     """
     Process a range of pages and return:
         - list of page texts in order (one string per page)
@@ -130,22 +130,22 @@ def _process_pdf_pages(
             eta = avg_time_per_batch * remaining_batches
             logger.info(f"Estimated remaining time: {timedelta(seconds=int(eta))}")
 
-    return all_page_texts, empty_pages
+    return all_page_texts, empty_pages, total_pages
 
 
 # -------------------------
 # Public function: process entire PDF
 # -------------------------
-def process_pdf(pdf_path: str, batch_size: int = 20) -> Tuple[List[str], List[int]]:
+def process_pdf(pdf_path: str, batch_size: int = 20) -> Tuple[List[str], List[int], int]:
     """
-    Process the whole PDF, return (page_texts, empty_pages).
+    Process the whole PDF, return (page_texts, empty_pages, total_pages).
     """
     start_time = time.time()
     layout = load_layout_model()
     reader = PdfReader(pdf_path)
     total_pages = len(reader.pages)
 
-    page_texts, empty_pages = _process_pdf_pages(
+    page_texts, empty_pages, total_pages = _process_pdf_pages(
         pdf_path,
         start_page=1,
         end_page=total_pages,
@@ -161,7 +161,7 @@ def process_pdf(pdf_path: str, batch_size: int = 20) -> Tuple[List[str], List[in
         logger.warning(f"Empty/short pages detected: {empty_pages}")
     else:
         logger.info("No empty pages detected.")
-    return page_texts, empty_pages
+    return page_texts, empty_pages, total_pages
 
 
 # -------------------------
@@ -172,15 +172,15 @@ def process_pdf_page_range(
     start_page: int,
     end_page: int,
     batch_size: int = 20
-) -> Tuple[List[str], List[int]]:
+) -> Tuple[List[str], List[int], int]:
     """
     Process a range of pages (1-indexed, inclusive).
-    Returns (page_texts, empty_pages).
+    Returns (page_texts, empty_pages, total_pages).
     """
     start_time = time.time()
     layout = load_layout_model()
 
-    page_texts, empty_pages = _process_pdf_pages(
+    page_texts, empty_pages, total_pages = _process_pdf_pages(
         pdf_path,
         start_page=start_page,
         end_page=end_page,
@@ -195,7 +195,7 @@ def process_pdf_page_range(
         logger.warning(f"Empty/short pages in range: {empty_pages}")
     else:
         logger.info("No empty pages detected in range.")
-    return page_texts, empty_pages
+    return page_texts, empty_pages, total_pages
 
 
 # -------------------------
@@ -233,6 +233,7 @@ def save_output_with_pages(
 # -------------------------
 if __name__ == "__main__":
     # Example: Process only select pages
-    page_texts, empty = process_pdf_page_range(FILEPATH, 100, 200, batch_size=10)
-    save_output_with_pages(page_texts, empty, "range_100-200.txt", start_page_num=100)
+    page_texts, empty, total_pages = process_pdf_page_range(FILEPATH, 1, 20, batch_size=10)
+    # page_texts, empty = process_pdf(FILEPATH, batch_size=20)
+    save_output_with_pages(page_texts, empty, "module_1_extracted_range_1-20.txt", start_page_num=1)
 
