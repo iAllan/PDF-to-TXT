@@ -1,7 +1,10 @@
 # Use official Python image
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 WORKDIR /app
+
+# Install system dependencies for opencv and others
+RUN apt-get update && apt-get install -y libxcb1 libgl1 libglib2.0-0
 
 # Install dependencies
 COPY requirements.txt .

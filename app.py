@@ -11,6 +11,9 @@ OUTPUT_DIR = "data/outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# -------------------------
+# API Endpoints
+# -------------------------
 @app.post("/extract")
 def extract_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     # Save uploaded PDF
@@ -68,6 +71,14 @@ def extract_pages(background_tasks: BackgroundTasks, page_range: str, file: Uplo
         analyze_output(txt_path, total_pages)
     background_tasks.add_task(process_and_clean)
     return {"message": f"Processing started for pages {page_range}", "txt_file": txt_filename}
+
+# -------------------------
+# Utility Endpoints
+# -------------------------
+
+@app.get("/")
+def root():
+    return {"message": "Welcome to the PDF to TXT extraction API. Use /extract to upload PDFs."}
 
 @app.get("/list")
 def list_outputs():
