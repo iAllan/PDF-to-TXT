@@ -1,11 +1,61 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: pdf_ocr_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"               # Expose for debugging (optional)
+    volumes:
+      - redis_data:/data           # Persist Redis data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   pdf-ocr-api:
     build: .
     container_name: pdf_ocr_api
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
+      - ./data:/app/data            # Shared volume for uploads/outputs
     environment:
-      - FILEPATH=
+      - FILEPATH=""
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+
+  pdf-ocr-worker:
+    build: .
+    container_name: pdf_ocr_worker
+    volumes:
+      - ./data:/app/data            # Same shared volume
+    environment:
+      - FILEPATH=""
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: celery -A celery_app worker --loglevel=info --concurrency=2
+
+  flower:
+    image: mher/flower:latest
+    container_name: pdf_ocr_flower
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - FLOWER_PORT=5555
+    depends_on:
+      - redis
+    restart: unless-stopped
+    # Optional: add basic authentication
+    # command: flower --basic_auth=user:password
+
+volumes:
+  redis_data:

@@ -1,9 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse
 import os
 import shutil
-from stripped_exctractor import process_pdf, save_output_with_pages, process_pdf_page_range
-from verification import clean_output_file, analyze_output
+from celery.result import AsyncResult
+from celery_app import celery_app
+from tasks import process_pdf_task
+import uuid
 
 app = FastAPI()
 UPLOAD_DIR = "data/uploads"
@@ -15,62 +17,73 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # API Endpoints
 # -------------------------
 @app.post("/extract")
-def extract_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    # Save uploaded PDF
+async def extract_pdf(file: UploadFile = File(...)):
     if not file.filename:
         raise ValueError("Uploaded file must have a filename.")
+
+    # Save file locally
     pdf_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(pdf_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    # Output TXT path
-    txt_filename = file.filename.replace(".pdf", ".txt")
-    txt_path = os.path.join(OUTPUT_DIR, txt_filename)
-    # Extraction and cleaning in background
-    def process_and_clean():
-        page_texts, empty_pages, total_pages = process_pdf(pdf_path)
-        save_output_with_pages(page_texts, empty_pages, txt_path)
-        clean_output_file(txt_path)
-        analyze_output(txt_path, total_pages)
-    background_tasks.add_task(process_and_clean)
-    return {"message": "Processing started", "txt_file": txt_filename}
+
+    # Enqueue Celery task
+    task = process_pdf_task.delay(file.filename)
+
+    return {
+        "message": "Processing started",
+        "task_id": task.id,
+        "txt_file": file.filename.replace(".pdf", ".txt")
+    }
 
 @app.post("/extract_batch")
-def extract_batch(background_tasks: BackgroundTasks, files: list[UploadFile] = File(...)):
-    responses = []
+async def extract_batch(files: list[UploadFile] = File(...)):
+    tasks = []
     for file in files:
         if not file.filename:
             continue
         pdf_path = os.path.join(UPLOAD_DIR, file.filename)
         with open(pdf_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
-        txt_filename = file.filename.replace(".pdf", ".txt")
-        txt_path = os.path.join(OUTPUT_DIR, txt_filename)
-        def process_and_clean():
-            page_texts, empty_pages, total_pages = process_pdf(pdf_path)
-            save_output_with_pages(page_texts, empty_pages, txt_path)
-            clean_output_file(txt_path)
-            analyze_output(txt_path, total_pages)
-        background_tasks.add_task(process_and_clean)
-        responses.append({"filename": file.filename, "txt_file": txt_filename})
-    return {"message": "Batch processing started", "files": responses}
 
-# Extract page range from filename (e.g., "document_1-3.pdf" -> pages 1 to 3)
+        task = process_pdf_task.delay(file.filename)
+        tasks.append({
+            "filename": file.filename,
+            "task_id": task.id,
+            "txt_file": file.filename.replace(".pdf", ".txt")
+        })
+
+    return {"message": "Batch processing started", "files": tasks}
+
 @app.post("/extract/pages/{page_range}")
-def extract_pages(background_tasks: BackgroundTasks, page_range: str, file: UploadFile = File(...)):
+async def extract_pages(page_range: str, file: UploadFile = File(...)):
     if not file.filename:
         raise ValueError("Uploaded file must have a filename.")
+
     pdf_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(pdf_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    txt_filename = file.filename.replace(".pdf", ".txt")
-    txt_path = os.path.join(OUTPUT_DIR, txt_filename)
-    def process_and_clean():
-        page_texts, empty_pages, total_pages = process_pdf_page_range(pdf_path, start_page=int(page_range.split("-")[0]), end_page=int(page_range.split("-")[1]))
-        save_output_with_pages(page_texts, empty_pages, txt_path)
-        clean_output_file(txt_path)
-        analyze_output(txt_path, total_pages)
-    background_tasks.add_task(process_and_clean)
-    return {"message": f"Processing started for pages {page_range}", "txt_file": txt_filename}
+
+    # You'll need a separate task that accepts page range parameters
+    # For now, using the full‑PDF task – modify as needed
+    task = process_pdf_task.delay(file.filename)
+
+    return {
+        "message": f"Processing started for pages {page_range}",
+        "task_id": task.id,
+        "txt_file": file.filename.replace(".pdf", ".txt")
+    }
+
+# New endpoint to check task status
+@app.get("/task/{task_id}")
+def get_task_status(task_id: str):
+    task_result = AsyncResult(task_id, app=celery_app)
+    if task_result.state == "PENDING":
+        response = {"state": task_result.state, "status": "Task is waiting or not started"}
+    elif task_result.state == "FAILURE":
+        response = {"state": task_result.state, "status": str(task_result.info)}
+    else:
+        response = {"state": task_result.state, "result": task_result.result}
+    return response
 
 # -------------------------
 # Utility Endpoints
