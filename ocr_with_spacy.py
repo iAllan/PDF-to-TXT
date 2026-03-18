@@ -1,218 +1,239 @@
 import spacy
 from spacy_layout import spaCyLayout
-import PyPDF2  # or pypdf (pip install pypdf)
-import tempfile
+from pypdf import PdfReader, PdfWriter
+import io
 import os
 import dotenv
 import logging
 import time
 from datetime import timedelta
+from typing import List, Tuple, Optional
 
 dotenv.load_dotenv()
-FILEPATH = os.getenv('FILEPATH')
+FILEPATH = os.getenv("FILEPATH") or ""
 
-# Configure logging
+# -------------------------
+# Logging Setup
+# -------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
 
-def _process_pdf_pages_internal(pdf_reader, start_page_0idx, end_page_0idx, nlp, layout, batch_size=50, overall_start_time=None):
+EMPTY_PAGE_THRESHOLD = 100  # characters
+
+
+# -------------------------
+# Load spaCy + Layout once
+# -------------------------
+def load_layout_model():
+    logger.info("Loading spaCy layout model...")
+    nlp = spacy.blank("en")
+    layout = spaCyLayout(nlp)
+    logger.info("Layout model ready")
+    return layout
+
+
+# -------------------------
+# Core processing function (used by both full and range)
+# -------------------------
+def _process_pdf_pages(
+    pdf_path: str,
+    start_page: int,          # 1-indexed, inclusive
+    end_page: int,            # 1-indexed, inclusive
+    batch_size: int = 20,
+    layout=None,              # optional pre-loaded layout
+    overall_start_time: Optional[float] = None  # for ETA
+) -> Tuple[List[str], List[int], int]:
     """
-    Internal helper to process a contiguous range of pages.
-    
-    Args:
-        pdf_reader: PyPDF2.PdfReader object
-        start_page_0idx: First page index (0-based)
-        end_page_0idx: Last page index (0-based, inclusive)
-        nlp: loaded spaCy model
-        layout: spaCyLayout instance
-        batch_size: pages per batch
-        overall_start_time: time.time() when overall processing started (for ETA)
-    
-    Returns:
-        List of extracted text per page (in order)
+    Process a range of pages and return:
+        - list of page texts in order (one string per page)
+        - list of page numbers that appear empty (below threshold)
     """
-    total_pages_in_range = end_page_0idx - start_page_0idx + 1
-    num_batches = (total_pages_in_range + batch_size - 1) // batch_size
-    all_text = []
-    
-    # If overall_start_time not provided, use current time (no meaningful ETA)
+    if layout is None:
+        layout = load_layout_model()
     if overall_start_time is None:
         overall_start_time = time.time()
 
-    for batch_num, batch_start in enumerate(range(0, total_pages_in_range, batch_size), 1):
+    reader = PdfReader(pdf_path)
+    total_pages = len(reader.pages)
+
+    # Clamp range to document bounds
+    start_idx = max(0, start_page - 1)
+    end_idx = min(total_pages - 1, end_page - 1)
+    if start_idx > end_idx:
+        raise ValueError(f"Invalid page range: {start_page}-{end_page} (document has {total_pages} pages)")
+
+    actual_start = start_idx + 1
+    actual_end = end_idx + 1
+    if actual_start != start_page or actual_end != end_page:
+        logger.warning(f"Adjusted range to pages {actual_start}-{actual_end}")
+
+    total_pages_in_range = actual_end - actual_start + 1
+    logger.info(f"Processing pages {actual_start} to {actual_end} ({total_pages_in_range} pages)")
+
+    all_page_texts = []
+    empty_pages = []
+
+    # Create batches within the range (0-based indices)
+    batches = [
+        (i, min(i + batch_size - 1, actual_end - 1))
+        for i in range(actual_start - 1, actual_end, batch_size)
+    ]
+    num_batches = len(batches)
+
+    for batch_num, (start_0, end_0) in enumerate(batches, 1):
         batch_start_time = time.time()
-        batch_absolute_start = start_page_0idx + batch_start
-        batch_absolute_end = min(start_page_0idx + batch_start + batch_size - 1, end_page_0idx)
-        pages_in_batch = batch_absolute_end - batch_absolute_start + 1
+        pages_in_batch = end_0 - start_0 + 1
+        logger.info(f"Batch {batch_num}/{num_batches} | Pages {start_0+1}-{end_0+1}")
 
-        logger.info(f"Batch {batch_num}/{num_batches}: Processing pages {batch_absolute_start+1} to {batch_absolute_end+1} ({pages_in_batch} pages)")
+        # Build batch PDF in memory
+        writer = PdfWriter()
+        for p in range(start_0, end_0 + 1):
+            writer.add_page(reader.pages[p])
+        pdf_buffer = io.BytesIO()
+        writer.write(pdf_buffer)
+        pdf_buffer.seek(0)
 
-        # Create temporary PDF with the pages in this batch
-        pdf_writer = PyPDF2.PdfWriter()
-        for page_num in range(batch_absolute_start, batch_absolute_end + 1):
-            pdf_writer.add_page(pdf_reader.pages[page_num])
+        # Run layout extraction
+        doc = layout(pdf_buffer.getvalue())
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-            pdf_writer.write(tmp_file)
-            tmp_path = tmp_file.name
-        logger.info(f"Temporary file created: {tmp_path}")
+        if not hasattr(doc._, 'pages'):
+            logger.error("doc._.pages not found – check spacy-layout installation")
+            raise AttributeError("Missing pages attribute")
 
-        try:
-            logger.info(f"Running spaCyLayout on batch {batch_num}...")
-            doc = layout(tmp_path)
-            logger.info(f"spaCyLayout completed for batch {batch_num}")
+        # Extract each page's text
+        for offset, (page_layout, spans) in enumerate(doc._.pages):
+            page_num = start_0 + offset + 1   # 1-indexed
+            # page_text = ''.join(span.text for span in spans).strip()
+            page_text = doc._.markdown  
+            all_page_texts.append(page_text)
 
-            # Extract text from pages in this batch
-            # Note: doc._.pages should correspond to the pages in the temporary PDF in order
-            page_text = doc._.markdown
-            all_text.append(page_text)
-            logger.debug(f"Extracted text from batch {batch_num} (length: {len(page_text)} chars)")
+            if len(page_text) < EMPTY_PAGE_THRESHOLD:
+                logger.warning(f"Page {page_num} may be empty (length {len(page_text)} chars)")
+                empty_pages.append(page_num)
 
-        except Exception as e:
-            logger.error(f"Error processing batch {batch_num}: {str(e)}", exc_info=True)
-            raise
-        finally:
-            os.unlink(tmp_path)
-            logger.info(f"Temporary file deleted: {tmp_path}")
+        del doc
 
-        del doc  # free memory
+        # Performance metrics and ETA
+        elapsed = time.time() - batch_start_time
+        pps = pages_in_batch / elapsed if elapsed > 0 else 0
+        logger.info(f"Batch finished in {timedelta(seconds=int(elapsed))} ({pps:.2f} pages/sec)")
 
-        batch_elapsed = time.time() - batch_start_time
-        logger.info(f"Batch {batch_num} completed in {timedelta(seconds=int(batch_elapsed))}")
-
-        # Estimate remaining time
-        elapsed_since_overall = time.time() - overall_start_time
         batches_done = batch_num
-        if batches_done > 0:
-            avg_time_per_batch = elapsed_since_overall / batches_done
-            remaining_batches = num_batches - batches_done
+        elapsed_since_start = time.time() - overall_start_time
+        avg_time_per_batch = elapsed_since_start / batches_done
+        remaining_batches = num_batches - batches_done
+        if remaining_batches > 0:
             eta = avg_time_per_batch * remaining_batches
-            if remaining_batches > 0:
-                logger.info(f"Estimated remaining time: {timedelta(seconds=int(eta))}")
+            logger.info(f"Estimated remaining time: {timedelta(seconds=int(eta))}")
 
-    return all_text
+    return all_page_texts, empty_pages, total_pages
 
-def process_pdf_full(pdf_path, batch_size=50):
+
+# -------------------------
+# Public function: process entire PDF
+# -------------------------
+def process_pdf(pdf_path: str, batch_size: int = 20) -> Tuple[List[str], List[int], int]:
     """
-    Process an entire PDF in batches.
-    
-    Args:
-        pdf_path: Path to the PDF file
-        batch_size: Number of pages per batch
-    
-    Returns:
-        List of extracted text per page (in order)
+    Process the whole PDF, return (page_texts, empty_pages, total_pages).
     """
-    overall_start_time = time.time()
-    logger.info(f"Starting full PDF processing: {pdf_path}")
-    logger.info(f"Batch size: {batch_size} pages")
+    start_time = time.time()
+    layout = load_layout_model()
+    reader = PdfReader(pdf_path)
+    total_pages = len(reader.pages)
 
-    # Load spaCy model once
-    logger.info("Loading spaCy model 'en_core_web_sm'...")
-    nlp = spacy.load("en_core_web_sm")
-    layout = spaCyLayout(nlp)
-    logger.info("spaCy model loaded successfully")
+    page_texts, empty_pages, total_pages = _process_pdf_pages(
+        pdf_path,
+        start_page=1,
+        end_page=total_pages,
+        batch_size=batch_size,
+        layout=layout,
+        overall_start_time=start_time
+    )
 
-    with open(pdf_path, 'rb') as file:
-        pdf_reader = PyPDF2.PdfReader(file)
-        total_pages = len(pdf_reader.pages)
-        logger.info(f"Total pages in PDF: {total_pages}")
+    total_elapsed = time.time() - start_time
+    logger.info(f"Completed in {timedelta(seconds=int(total_elapsed))}")
+    logger.info(f"Total pages extracted: {len(page_texts)}")
+    if empty_pages:
+        logger.warning(f"Empty/short pages detected: {empty_pages}")
+    else:
+        logger.info("No empty pages detected.")
+    return page_texts, empty_pages, total_pages
 
-        all_text = _process_pdf_pages_internal(
-            pdf_reader=pdf_reader,
-            start_page_0idx=0,
-            end_page_0idx=total_pages-1,
-            nlp=nlp,
-            layout=layout,
-            batch_size=batch_size,
-            overall_start_time=overall_start_time
-        )
 
-    total_elapsed = time.time() - overall_start_time
-    logger.info(f"Full PDF processing completed in {timedelta(seconds=int(total_elapsed))}")
-    logger.info(f"Total characters extracted: {len(all_text)}")
-    return all_text
-
-def process_pdf_page_range(pdf_path, start_page, end_page, batch_size=50):
+# -------------------------
+# Public function: process a specific page range
+# -------------------------
+def process_pdf_page_range(
+    pdf_path: str,
+    start_page: int,
+    end_page: int,
+    batch_size: int = 20
+) -> Tuple[List[str], List[int], int]:
     """
-    Process a specific range of pages from a PDF.
-    
-    Args:
-        pdf_path: Path to the PDF file
-        start_page: First page to process (1-indexed, inclusive)
-        end_page: Last page to process (1-indexed, inclusive)
-        batch_size: Number of pages per batch
-    
-    Returns:
-        List of extracted text per page (in order of the range)
+    Process a range of pages (1-indexed, inclusive).
+    Returns (page_texts, empty_pages, total_pages).
     """
-    overall_start_time = time.time()
-    logger.info(f"Starting page range processing: {pdf_path}")
-    logger.info(f"Requested range: pages {start_page} to {end_page} (inclusive)")
-    logger.info(f"Batch size: {batch_size} pages")
+    start_time = time.time()
+    layout = load_layout_model()
 
-    # Validate inputs
-    if start_page < 1 or end_page < 1 or start_page > end_page:
-        raise ValueError("Invalid page range: start_page and end_page must be >=1 and start_page <= end_page")
+    page_texts, empty_pages, total_pages = _process_pdf_pages(
+        pdf_path,
+        start_page=start_page,
+        end_page=end_page,
+        batch_size=batch_size,
+        layout=layout,
+        overall_start_time=start_time
+    )
 
-    # Load spaCy model once
-    logger.info("Loading spaCy model 'en_core_web_sm'...")
-    nlp = spacy.load("en_core_web_sm")
-    layout = spaCyLayout(nlp)
-    logger.info("spaCy model loaded successfully")
+    total_elapsed = time.time() - start_time
+    logger.info(f"Range processing completed in {timedelta(seconds=int(total_elapsed))}")
+    if empty_pages:
+        logger.warning(f"Empty/short pages in range: {empty_pages}")
+    else:
+        logger.info("No empty pages detected in range.")
+    return page_texts, empty_pages, total_pages
 
-    with open(pdf_path, 'rb') as file:
-        pdf_reader = PyPDF2.PdfReader(file)
-        total_pages = len(pdf_reader.pages)
-        logger.info(f"Total pages in PDF: {total_pages}")
 
-        # Convert to 0-based indices and clamp to available pages
-        start_0idx = max(0, start_page - 1)
-        end_0idx = min(total_pages - 1, end_page - 1)
-
-        if start_0idx > end_0idx:
-            raise ValueError(f"Requested range {start_page}-{end_page} is outside document (only {total_pages} pages)")
-
-        actual_start = start_0idx + 1
-        actual_end = end_0idx + 1
-        if actual_start != start_page or actual_end != end_page:
-            logger.warning(f"Page range adjusted to {actual_start}-{actual_end} (document has {total_pages} pages)")
-
-        all_text = _process_pdf_pages_internal(
-            pdf_reader=pdf_reader,
-            start_page_0idx=start_0idx,
-            end_page_0idx=end_0idx,
-            nlp=nlp,
-            layout=layout,
-            batch_size=batch_size,
-            overall_start_time=overall_start_time
-        )
-
-    total_elapsed = time.time() - overall_start_time
-    logger.info(f"Page range processing completed in {timedelta(seconds=int(total_elapsed))}")
-    logger.info(f"Pages extracted in range: {len(all_text)}")
-    return all_text
-
-# Example usage
-if __name__ == "__main__":
-    pdf_path = FILEPATH
-
-    # Option 1: Process entire document
-    all_text = process_pdf_full(pdf_path, batch_size=25)
-    
-    # Option 2: Process only pages within a specific range (e.g., pages 50-60)
-    # range_text = process_pdf_page_range(pdf_path, start_page=50, end_page=60, batch_size=20)
-
-    # Save the extracted range
-    output_path = "extracted_range.txt"
-    logger.info(f"Saving extracted range to {output_path}")
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for relative_idx, text in enumerate(all_text, start=1):
-            f.write(f"--- Page {relative_idx} ---\n")
+# -------------------------
+# Save Output with Page Markers
+# -------------------------
+def save_output_with_pages(
+    page_texts: List[str],
+    empty_pages: List[int],
+    output_file: str = "extracted_text.txt",
+    start_page_num: int = 1
+):
+    """
+    Save extracted page texts, marking each page.
+    Also write a summary of empty pages to a separate file.
+    """
+    logger.info(f"Saving output to {output_file}")
+    with open(output_file, "w", encoding="utf-8") as f:
+        for i, text in enumerate(page_texts, start=start_page_num):
+            f.write(f"\n--- Page {i} ---\n\n")
             f.write(text)
-            f.write("\n\n")
-    logger.info(f"Range saved successfully. File size: {os.path.getsize(output_path)} bytes")
+            f.write("\n")
+    logger.info(f"Saved successfully ({os.path.getsize(output_file)} bytes)")
+
+    if empty_pages:
+        empty_file = output_file.replace(".txt", "_empty_pages.txt")
+        with open(empty_file, "w") as f:
+            f.write("Pages with very short text:\n")
+            for p in empty_pages:
+                f.write(f"{p}\n")
+        logger.info(f"Empty pages list saved to {empty_file}")
+
+
+# -------------------------
+# Run (example usage)
+# -------------------------
+if __name__ == "__main__":
+    # Example: Process only select pages
+    page_texts, empty, total_pages = process_pdf_page_range(FILEPATH, 1, 20, batch_size=10)
+    # page_texts, empty = process_pdf(FILEPATH, batch_size=20)
+    save_output_with_pages(page_texts, empty, "module_1_extracted_range_1-20.txt", start_page_num=1)
+

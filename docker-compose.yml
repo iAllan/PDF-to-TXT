@@ -14,7 +14,9 @@ services:
       retries: 5
 
   pdf-ocr-api:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile.api
     container_name: pdf_ocr_api
     ports:
       - "8000:8000"
@@ -30,7 +32,9 @@ services:
     command: uvicorn app:app --host 0.0.0.0 --port 8000
 
   pdf-ocr-worker:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile.worker
     container_name: pdf_ocr_worker
     volumes:
       - ./data:/app/data            # Same shared volume
