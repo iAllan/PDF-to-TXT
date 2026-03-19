@@ -10,6 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.worker.txt .
 RUN pip install --no-cache-dir -r requirements.worker.txt
 
-COPY tasks.py celery_app.py ocr_with_spacy.py stripped_exctractor.py verification.py ./
+COPY tasks.py celery_app.py ocr_with_spacy.py stripped_extractor.py verification.py ./
 
 CMD ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=2"]

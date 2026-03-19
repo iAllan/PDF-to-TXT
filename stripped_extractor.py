@@ -17,23 +17,25 @@ EMPTY_PAGE_THRESHOLD = 100
 OCR_DPI = 300  # higher = more accurate but slower
 
 
+OCR_DPI = 200  # was 300 — saves ~44% memory, still accurate enough
+
 def _extract_page_text(page: fitz.Page) -> str:
-    """
-    Try native text extraction first.
-    Fall back to Tesseract OCR if the page appears to be a scanned image.
-    """
-    text = page.get_text("markdown").strip()
+    text = page.get_text("text").strip()
 
     if len(text) >= EMPTY_PAGE_THRESHOLD:
-        return text  # Digital PDF page — fast path, no OCR needed
+        return text
 
-    # Scanned page — render to image and OCR
     logger.info(f"Page {page.number + 1} appears scanned, running OCR...")
-    mat = fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72)  # scale to target DPI
+    mat = fitz.Matrix(OCR_DPI / 72, OCR_DPI / 72)
     pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    ocr_text = pytesseract.image_to_string(img, lang="eng")
-    return ocr_text.strip()
+
+    try:
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        ocr_text = pytesseract.image_to_string(img, lang="eng")
+        return ocr_text.strip()
+    finally:
+        pix = None
+        img.close() if 'img' in dir() else None
 
 
 def _process_pdf_pages(

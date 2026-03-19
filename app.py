@@ -4,7 +4,6 @@ import os
 import shutil
 from celery.result import AsyncResult
 from celery_app import celery_app
-from tasks import process_pdf_task
 import uuid
 
 app = FastAPI()
@@ -27,7 +26,7 @@ async def extract_pdf(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
 
     # Enqueue Celery task
-    task = process_pdf_task.delay(file.filename)
+    task = celery_app.send_task("tasks.process_pdf_task", args=[file.filename])
 
     return {
         "message": "Processing started",
@@ -45,7 +44,7 @@ async def extract_batch(files: list[UploadFile] = File(...)):
         with open(pdf_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        task = process_pdf_task.delay(file.filename)
+        task = celery_app.send_task("tasks.process_pdf_task", args=[file.filename])
         tasks.append({
             "filename": file.filename,
             "task_id": task.id,
@@ -63,14 +62,25 @@ async def extract_pages(page_range: str, file: UploadFile = File(...)):
     with open(pdf_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # You'll need a separate task that accepts page range parameters
-    # For now, using the full‑PDF task – modify as needed
-    task = process_pdf_task.delay(file.filename)
+    task = celery_app.send_task("tasks.process_pdf_task", args=[file.filename, page_range])
 
     return {
         "message": f"Processing started for pages {page_range}",
         "task_id": task.id,
         "txt_file": file.filename.replace(".pdf", ".txt")
+    }
+
+@app.post("/extract/{file_name}")
+async def extract_specific(file_name: str):
+    pdf_path = os.path.join(UPLOAD_DIR, file_name)
+    if not os.path.exists(pdf_path):
+        return {"error": "File not found in upload directory."}
+
+    task = celery_app.send_task("tasks.process_pdf_task", args=[file_name])
+    return {
+        "message": f"Processing started for {file_name}",
+        "task_id": task.id,
+        "txt_file": file_name.replace(".pdf", ".txt")
     }
 
 # New endpoint to check task status
@@ -97,6 +107,11 @@ def root():
 def list_outputs():
     txt_files = [f for f in os.listdir(OUTPUT_DIR) if f.endswith(".txt")]
     return {"txt_files": txt_files}
+
+@app.get("/list_pdfs")
+def list_pdfs():
+    pdf_files = [f for f in os.listdir(UPLOAD_DIR) if f.endswith(".pdf")]
+    return {"pdf_files": pdf_files}
 
 @app.get("/status/{txt_filename}")
 def check_status(txt_filename: str):
